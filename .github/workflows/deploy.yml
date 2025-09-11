@@ -13,73 +13,40 @@ on:
           - restart
 
 jobs:
-  deploy:
+  build:
+    if: ${{ github.event.inputs.command == 'deploy' }} # ← 仅在 deploy 时构建
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: checkout
         uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: login to dockerhub
+        uses: docker/login-action@v2
         with:
-          go-version: '1.23'
-
-      - name: Build binary
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+      - name: build docker image
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o app.bin main.go
-          chmod +x app.bin
-
-      - name: Copy binary to EC2
-        uses: appleboy/scp-action@v0.1.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: ./app.bin
-          target: ~/app/release/app.bin
-      - name: Manage service on EC2
-        uses: appleboy/ssh-action@v0.1.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            set -e
-            # 1. 目录准备
-            timestamp=$(date +%s)
-            mkdir -p ~/app/releases/$timestamp
-            # 2. 移动文件到时间戳目录
-            mv ~/app/releases/app.bin ~/app/releases/$timestamp/app.bin
-            # 3. 软链到当前版本
-            ln -sfn ~/app/releases/$timestamp/app.bin ~/app/current.bin
-            # 4. systemd 服务脚本（一次性）
-            sudo tee /etc/systemd/system/goapp.service > /dev/null <<EOF
-            [Unit]
-            Description=Go App
-            After=network.target
-
-            [Service]
-            Type=simple
-            User=ubuntu
-            WorkingDirectory=/home/ubuntu
-            ExecStart=/home/ubuntu/app/current.bin
-            Restart=always
-            RestartSec=5
-
-            [Install]
-            WantedBy=multi-user.target
-            EOF
-            # 5. 启动 or 重启
-            if [ "${{ github.event.inputs.command }}" = "restart" ]; then
-              sudo systemctl restart goapp
-            else
-              sudo systemctl daemon-reload
-              sudo systemctl enable goapp
-              sudo systemctl start goapp
-            fi
-            # 6. 健康检查
-            sleep 3 && curl -f http://localhost:8080 || exit 1
-
-      - name: Show public URL
+          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy .
+      - name: push to dockerhub
         run: |
-          echo "App should be live at: http://${{ secrets.EC2_HOST }}:8080"
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
+  deploy:
+    needs: build
+    runs-on: self-hosted
+    steps:
+      - name: pull the docker image
+        run: |
+          docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
+      - name: run docker container
+        run: |
+          if [ "${{ github.event.inputs.command }}" = "deploy" ]; then
+            docker stop go-deploy || true
+            docker rm go-deploy || true
+            docker run -d --name go-deploy -p 8080:8080 ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
+          elif [ "${{ github.event.inputs.command }}" = "restart" ]; then
+            docker restart go-deploy || true
+          else
+            echo "Unknown command: ${{ github.event.inputs.command }}"
+            exit 1
+          fi
+
