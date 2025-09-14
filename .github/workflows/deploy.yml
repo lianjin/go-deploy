@@ -3,6 +3,11 @@ name: Deploy Go to EC2 (manual)
 on:
   workflow_dispatch:          # ← 纯手动按钮
     inputs:
+      version:
+        description: 'version'
+        required: false
+        default: 'latest'
+        type: string
       command:
         description: 'deploy or restart'
         required: true
@@ -14,6 +19,8 @@ on:
 
 jobs:
   build:
+    env:
+      DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
     if: ${{ github.event.inputs.command == 'deploy' }} # ← 仅在 deploy 时构建
     runs-on: ubuntu-latest
     steps:
@@ -26,27 +33,30 @@ jobs:
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
       - name: build docker image
         run: |
-          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy .
+          docker build -t "${DOCKER_HUB_USERNAME}/go-deploy:${{ github.event.inputs.version }}" .
       - name: push to dockerhub
         run: |
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
+          docker push "${DOCKER_HUB_USERNAME}/go-deploy:${{ github.event.inputs.version }}"
   deploy:
+    if: ${{ github.event.inputs.command == 'deploy' }} 
     needs: build
     runs-on: self-hosted
+    env:
+      DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
     steps:
       - name: pull the docker image
         run: |
-          docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
+          docker pull "${DOCKER_HUB_USERNAME}/go-deploy:${{ github.event.inputs.version }}"
       - name: run docker container
         run: |
-          if [ "${{ github.event.inputs.command }}" = "deploy" ]; then
-            docker stop go-deploy || true
-            docker rm go-deploy || true
-            docker run -d --name go-deploy -p 8080:8080 ${{ secrets.DOCKER_HUB_USERNAME }}/go-deploy:latest
-          elif [ "${{ github.event.inputs.command }}" = "restart" ]; then
-            docker restart go-deploy || true
-          else
-            echo "Unknown command: ${{ github.event.inputs.command }}"
-            exit 1
-          fi
+          docker stop go-deploy || true
+          docker rm go-deploy || true
+          docker run -d --name go-deploy -p 8080:8080 "${DOCKER_HUB_USERNAME}/go-deploy:${{ github.event.inputs.version }}"
+  restart:
+    if: ${{ github.event.inputs.command == 'restart' }} 
+    runs-on: self-hosted
+    steps:
+      - name: restart docker container
+        run: |
+          docker restart go-deploy || true
 
